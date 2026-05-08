@@ -46,7 +46,7 @@ Built for convenience when typing Frida commands repeatedly is annoying.
 ---
 
 ## Screenshots
-> Add your screenshots under `./screenshots/` and update links below.
+<img width="1594" height="905" alt="bb8b72c1b5b15bcc7e82cd2cce75639c" src="https://github.com/user-attachments/assets/db3ca64f-26c9-4ed2-b943-b9079a7b434b" />
 
 - Main window: `screenshots/main.png`
 - Running example: `screenshots/running.png`
