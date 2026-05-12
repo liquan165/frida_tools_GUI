@@ -11,15 +11,16 @@ import subprocess
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QAction
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QPlainTextEdit, QGroupBox, QListWidget, QListWidgetItem,
-    QRadioButton, QMessageBox, QSplitter, QComboBox
+    QRadioButton, QMessageBox, QSplitter, QComboBox, QFileDialog, QMenu
 )
 
 TOOL_DIR = "/data/local/tmp/hacktools"
+DEFAULT_JS_DIR = r"D:\hacktools\Mobile\fridatools"
 
 
 def run_cmd(cmd, timeout=60, check=False):
@@ -61,6 +62,7 @@ def parse_adb_devices(output: str):
 class AppState:
     selected_package: str = ""
     selected_js: str = ""
+    js_dir: str = DEFAULT_JS_DIR
 
 
 class Worker(QThread):
@@ -254,6 +256,20 @@ class MainWindow(QMainWindow):
         row_mode.addStretch(1)
         v_run.addLayout(row_mode)
 
+        # JS 目录选择
+        row_js_dir = QHBoxLayout()
+        lbl_js_dir = QLabel("JS目录:")
+        self.ed_js_dir = QLineEdit()
+        self.ed_js_dir.setText(DEFAULT_JS_DIR)
+        self.ed_js_dir.setEnabled(False)
+        self.btn_browse_dir = QPushButton("浏览...")
+        self.btn_browse_dir.setEnabled(False)
+        row_js_dir.addWidget(lbl_js_dir)
+        row_js_dir.addWidget(self.ed_js_dir, 1)
+        row_js_dir.addWidget(self.btn_browse_dir)
+        v_run.addLayout(row_js_dir)
+
+        # JS 文件选择
         row_js = QHBoxLayout()
         self.cb_js = QComboBox()
         self.cb_js.setEnabled(False)
@@ -292,6 +308,8 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.log_view.customContextMenuRequested.connect(self.show_log_context_menu)
         v_log.addWidget(self.log_view)
 
         # simple input line (best-effort for frida interactive input)
@@ -318,6 +336,7 @@ class MainWindow(QMainWindow):
         self.list_pkgs.itemSelectionChanged.connect(self.on_pkg_selected)
         self.btn_use_custom.clicked.connect(self.on_use_custom)
         self.btn_refresh_js.clicked.connect(self.refresh_js_list)
+        self.btn_browse_dir.clicked.connect(self.on_browse_js_dir)
         self.btn_run.clicked.connect(self.on_run)
 
         self.btn_stop.clicked.connect(self.on_stop_frida)
@@ -341,6 +360,8 @@ class MainWindow(QMainWindow):
             self.btn_search_pkg.setEnabled(False)
             self.list_pkgs.setEnabled(False)
             self.btn_refresh_js.setEnabled(False)
+            self.btn_browse_dir.setEnabled(False)
+            self.ed_js_dir.setEnabled(False)
             self.cb_js.setEnabled(False)
             self.btn_use_custom.setEnabled(False)
             self.ed_keyword.setEnabled(False)
@@ -355,6 +376,8 @@ class MainWindow(QMainWindow):
         self.btn_search_pkg.setEnabled(True)
         self.list_pkgs.setEnabled(True)
         self.btn_refresh_js.setEnabled(True)
+        self.btn_browse_dir.setEnabled(True)
+        self.ed_js_dir.setEnabled(True)
         self.cb_js.setEnabled(True)
         self.btn_use_custom.setEnabled(True)
         self.ed_keyword.setEnabled(True)
@@ -499,16 +522,45 @@ class MainWindow(QMainWindow):
         self.update_run_button()
 
     def refresh_js_list(self):
-        js_files = sorted(glob.glob("*.js"))
+        js_dir = self.ed_js_dir.text().strip()
+        if not js_dir or not os.path.exists(js_dir):
+            self.append_log(f"[!] JS目录不存在: {js_dir}")
+            return
+        
+        self.state.js_dir = js_dir
+        pattern = os.path.join(js_dir, "*.js")
+        js_files = sorted(glob.glob(pattern))
+        
         self.cb_js.clear()
         for f in js_files:
             self.cb_js.addItem(f)
-        self.state.selected_js = js_files[0] if js_files else ""
+        
+        if js_files:
+            self.state.selected_js = js_files[0]
+            self.append_log(f"[*] 找到 {len(js_files)} 个JS文件")
+        else:
+            self.state.selected_js = ""
+            self.append_log(f"[!] 在 {js_dir} 中未找到JS文件")
+        
         self.update_run_button()
+    
+    def on_browse_js_dir(self):
+        """浏览并选择 JS 脚本目录"""
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择 JS 脚本目录",
+            self.ed_js_dir.text() or DEFAULT_JS_DIR
+        )
+        if dir_path:
+            self.ed_js_dir.setText(dir_path)
+            self.state.js_dir = dir_path
+            self.append_log(f"[*] 已选择目录: {dir_path}")
+            self.refresh_js_list()
 
     def update_run_button(self):
         has_pkg = bool(self.state.selected_package.strip())
-        has_js = self.cb_js.count() > 0 and os.path.exists(self.cb_js.currentText().strip())
+        js_file = self.cb_js.currentText().strip()
+        has_js = self.cb_js.count() > 0 and js_file and os.path.exists(js_file)
         frida_not_running = self.frida_runner is None or (self.frida_runner.proc is None) or (self.frida_runner.proc.poll() is not None)
         self.btn_run.setEnabled(has_pkg and has_js and frida_not_running)
 
@@ -521,10 +573,17 @@ class MainWindow(QMainWindow):
 
         js_file = self.cb_js.currentText().strip()
         if not js_file or not os.path.exists(js_file):
-            self.error_box("错误", "未选择有效的JS文件")
+            self.error_box("错误", f"未选择有效的JS文件\n路径: {js_file}")
             return
+        
+        # 修复路径分隔符问题：Windows 反斜杠转为正斜杠
+        js_file_normalized = js_file.replace('\\', '/')
 
-        attach_mode = self.rb_attach.isChecked()
+        # 保存 attach_mode 到实例变量，避免作用域问题
+        self._current_attach_mode = self.rb_attach.isChecked()
+        self._current_pkg = pkg
+        self._current_js_file = js_file
+        self._current_js_file_normalized = js_file_normalized
 
         def task(log):
             log("adb forward tcp:27042 tcp:27042")
@@ -534,27 +593,56 @@ class MainWindow(QMainWindow):
             run_adb_shell(su_c("rm -rf /data/local/tmp/hook/"), timeout=20)
 
             log("================================")
-            log(f"目标包名: {pkg}")
-            log(f"使用脚本: {js_file}")
-            log(f"运行模式: {'Attach' if attach_mode else 'Spawn'}")
+            log(f"目标包名: {self._current_pkg}")
+            log(f"使用脚本: {self._current_js_file}")
+            log(f"标准化路径: {self._current_js_file_normalized}")
+            log(f"运行模式: {'Attach' if self._current_attach_mode else 'Spawn'}")
             log("================================")
 
-            if attach_mode:
+            if self._current_attach_mode:
                 log("正在检查进程是否运行 ...")
-                _, out, _ = run_adb_shell(f"ps | grep {shlex.quote(pkg)} | grep -v grep", timeout=20)
+                _, out, _ = run_adb_shell(f"ps | grep {shlex.quote(self._current_pkg)} | grep -v grep", timeout=20)
                 if out.strip() == "":
                     log("[警告] 目标进程未运行，尝试启动应用 ...")
-                    run_adb_shell(f"monkey -p {shlex.quote(pkg)} 1", timeout=20)
+                    run_adb_shell(f"monkey -p {shlex.quote(self._current_pkg)} 1", timeout=20)
                     log("等待应用启动 3 秒 ...")
                     import time
                     time.sleep(3)
 
         def after_ok():
-            # Start frida runner (non-blocking)
-            if attach_mode:
-                cmd = ["frida", "-U", pkg, "-l", js_file]
+            # 在最开始就输出日志，确保函数被执行
+            self.append_log("[DEBUG] after_ok() 函数开始执行")
+            self.append_log(f"[DEBUG] sys.executable = {sys.executable}")
+            
+            # 修复：使用 python -m 方式调用 frida，解决 maye 启动时的环境变量问题
+            import shutil
+            
+            self.append_log("[DEBUG] 开始查找 frida 路径...")
+            
+            # 尝试查找 frida 完整路径
+            frida_path = shutil.which("frida")
+            
+            self.append_log(f"[DEBUG] shutil.which('frida') 返回: {frida_path}")
+            
+            if frida_path:
+                # 如果找到了 frida，使用完整路径
+                frida_cmd = [frida_path]
+                self.append_log(f"[调试] 使用 Frida 路径: {frida_path}")
             else:
-                cmd = ["frida", "-U", "-l", js_file, "-f", pkg]
+                # 使用 python -m 方式（更稳定，推荐）
+                frida_cmd = [sys.executable, "-m", "frida_tools.cli"]
+                self.append_log(f"[调试] 使用 Python 模块: {sys.executable} -m frida_tools.cli")
+            
+            self.append_log(f"[DEBUG] 最终命令列表: {frida_cmd}")
+            
+            # Start frida runner (non-blocking)
+            # 使用实例变量，避免作用域问题
+            if self._current_attach_mode:
+                cmd = frida_cmd + ["-U", self._current_pkg, "-l", self._current_js_file_normalized]
+            else:
+                cmd = frida_cmd + ["-U", "-l", self._current_js_file_normalized, "-f", self._current_pkg]
+            
+            self.append_log(f"[DEBUG] 完整命令: {cmd}")
 
             self.start_frida(cmd)
 
@@ -570,7 +658,7 @@ class MainWindow(QMainWindow):
         self.frida_runner.log.connect(self.append_log)
 
         def on_started():
-            self.append_log("[Frida] 已启动，可点击“停止/强制结束”。")
+            self.append_log("[Frida] 已启动，可点击停止/强制结束。")
             self.btn_stop.setEnabled(True)
             self.btn_kill.setEnabled(True)
             self.ed_stdin.setEnabled(True)
@@ -610,6 +698,67 @@ class MainWindow(QMainWindow):
             return
         self.frida_runner.write_stdin_line(s)
         self.ed_stdin.clear()
+
+    def show_log_context_menu(self, pos):
+        """显示日志区域的右键菜单"""
+        menu = QMenu(self)
+        
+        # 清空日志动作
+        clear_action = QAction("清空日志", self)
+        clear_action.triggered.connect(self.clear_log)
+        menu.addAction(clear_action)
+        
+        # 复制选中文本动作
+        copy_action = QAction("复制", self)
+        copy_action.triggered.connect(self.log_view.copy)
+        copy_action.setEnabled(self.log_view.textCursor().hasSelection())
+        menu.addAction(copy_action)
+        
+        # 全选动作
+        select_all_action = QAction("全选", self)
+        select_all_action.triggered.connect(self.log_view.selectAll)
+        menu.addAction(select_all_action)
+        
+        # 分隔符
+        menu.addSeparator()
+        
+        # 导出日志动作
+        export_action = QAction("导出日志到文件...", self)
+        export_action.triggered.connect(self.export_log)
+        menu.addAction(export_action)
+        
+        # 在鼠标位置显示菜单
+        menu.exec(self.log_view.mapToGlobal(pos))
+    
+    def clear_log(self):
+        """清空日志"""
+        reply = QMessageBox.question(
+            self,
+            "确认清空",
+            "确定要清空所有日志吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.log_view.clear()
+            self.append_log("[*] 日志已清空")
+    
+    def export_log(self):
+        """导出日志到文件"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出日志",
+            "frida_log.txt",
+            "Text Files (*.txt);;Log Files (*.log);;All Files (*.*)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(self.log_view.toPlainText())
+                self.append_log(f"[+] 日志已导出到: {file_path}")
+                QMessageBox.information(self, "导出成功", f"日志已保存到:\n{file_path}")
+            except Exception as e:
+                self.error_box("导出失败", f"无法保存日志文件:\n{str(e)}")
 
 
 def main():
